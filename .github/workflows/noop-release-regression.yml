@@ -1,0 +1,49 @@
+name: Asset-only release regression
+on:
+  push:
+    branches: [regression-noop-release]
+permissions:
+  contents: write
+jobs:
+  overwrite:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TEST_TAG: noop-regression-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Create isolated release and existing asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$TEST_TAG" --target "$GITHUB_SHA" --title 'Original release title' --notes 'Keep these release notes' --latest=false
+          printf 'old archive bytes\n' > release.txt
+          gh release upload "$TEST_TAG" release.txt
+          old_id=$(gh api "repos/$GH_REPO/releases/tags/$TEST_TAG" --jq '.assets[] | select(.name=="release.txt") | .id')
+          echo "OLD_ASSET_ID=$old_id" >> "$GITHUB_ENV"
+          printf 'replacement archive bytes\n' > release.txt
+      - name: Replace asset using the exact patched action
+        uses: danoli3/action-gh-release@ec40b04e78c39008f73c4ca3fdf9b51df604c4ed
+        with:
+          token: ${{ github.token }}
+          tag_name: ${{ env.TEST_TAG }}
+          draft: false
+          overwrite_files: true
+          files: release.txt
+      - name: Verify metadata and replaced bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GH_REPO/releases/tags/$TEST_TAG" --jq .name)" = 'Original release title'
+          test "$(gh api "repos/$GH_REPO/releases/tags/$TEST_TAG" --jq .body)" = 'Keep these release notes'
+          new_id=$(gh api "repos/$GH_REPO/releases/tags/$TEST_TAG" --jq '.assets[] | select(.name=="release.txt") | .id')
+          test "$new_id" != "$OLD_ASSET_ID"
+          gh release download "$TEST_TAG" --pattern release.txt --dir downloaded
+          cmp release.txt downloaded/release.txt
+      - name: Remove only this disposable release
+        if: always()
+        shell: bash
+        run: |
+          case "$TEST_TAG" in noop-regression-"$GITHUB_RUN_ID"-*) ;; *) exit 1 ;; esac
+          gh release delete "$TEST_TAG" --yes --cleanup-tag
